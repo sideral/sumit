@@ -241,7 +241,6 @@ function game(op: Op, mode: Mode, minutes: number) {
   let locked = true;
   let raf = 0;
   let over = false;
-  let streak = 0;
   let lastSec = -1;
   const solves: Solve[] = [];
   const recent: Problem[] = [];
@@ -300,7 +299,6 @@ function game(op: Op, mode: Mode, minutes: number) {
   /** Full-length but wrong: shake, clear, keep going. Costs only time. */
   function miss() {
     misses++;
-    streak = 0;
     sfx.miss();
     locked = true;
     ansEl.classList.add('bad');
@@ -328,7 +326,7 @@ function game(op: Op, mode: Mode, minutes: number) {
 
   function solved() {
     record(true);
-    sfx.correct(streak++);
+    sfx.correct();
     locked = true;
     ansEl.classList.add('ok');
     const sp = h('span.spark', {}, icon('check', 28));
@@ -463,7 +461,6 @@ function result(op: Op, score: number, badge: Badge) {
     done.style.strokeDasharray = `${len}`;
     const t0 = performance.now();
     const D = reduced() ? 1 : 1500;
-    if (score) setTimeout(() => sfx.climb(D / 1000), 500);
     const step = (now: number) => {
       const t = Math.min((now - t0) / D, 1);
       const e = 1 - Math.pow(1 - t, 3);

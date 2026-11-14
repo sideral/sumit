@@ -86,20 +86,16 @@ export const sfx = {
   /** Start-lights beep and final "go". */
   light() { tone({ f: 440, d: 0.16, v: 0.16, type: 'triangle' }); },
   go() { tone({ f: 880, d: 0.32, v: 0.2, type: 'triangle' }); tone({ f: 1320, d: 0.3, v: 0.06, type: 'sine' }); },
-  /** Correct: pitch climbs a little with the streak. */
-  correct(streak: number) {
-    const steps = [N.C6, N.D5 * 2, N.E6, N.G5 * 2, N.A5 * 2];
-    const f = steps[Math.min(Math.floor(streak / 3), steps.length - 1)];
-    tone({ f, d: 0.12, v: 0.13, type: 'sine' });
-    tone({ f: f * 1.5, t: 0.04, d: 0.12, v: 0.06, type: 'sine' });
+  /** Correct: always the same gentle ping — no rising pitch, no tension. */
+  correct() {
+    tone({ f: N.C6, d: 0.12, v: 0.13, type: 'sine' });
+    tone({ f: N.C6 * 1.5, t: 0.04, d: 0.12, v: 0.06, type: 'sine' });
   },
   miss() { tone({ f: 180, to: 120, d: 0.16, v: 0.22, type: 'triangle' }); },
   /** Last 10 seconds. */
   tick() { tone({ f: 2000, d: 0.025, v: 0.06, type: 'square' }); },
   /** Time's up: low gong. */
   end() { bell(N.C4, 0, 1.4, 0.26); bell(N.G4, 0.02, 1.1, 0.1); },
-  /** Result count-up: soft rising sweep. */
-  climb(dur: number) { tone({ f: 300, to: 900, d: dur, v: 0.05, type: 'sine', a: 0.2 }); },
   /** New best / summit. */
   record() { [N.C5, N.E5, N.G5, N.C6].forEach((f, i) => bell(f, i * 0.09, 0.8, 0.16)); },
   camp() { bell(N.E5, 0, 0.8, 0.15); bell(N.A5, 0.12, 1, 0.13); },
