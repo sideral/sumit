@@ -8,8 +8,12 @@ export interface Attempt {
   a: number;
   b: number;
   given: number | null;
+  /** Solved (not skipped). */
   correct: boolean;
   ms: number;
+  /** Wrong full-length entries before solving. */
+  misses?: number;
+  skipped?: boolean;
 }
 
 export interface Round {
@@ -18,8 +22,11 @@ export interface Round {
   op: Op;
   mode: Mode;
   duration: number; // minutes
+  /** Altitude at the time; recomputed on load from speed vs. base camp. */
   score: number;
   count: number;
+  /** Speed index, see engine/score.ts. */
+  speed?: number;
 }
 
 export type Theme = 'system' | 'light' | 'dark';
@@ -28,9 +35,10 @@ export interface Settings {
   op: Op;
   mode: Mode;
   duration: number;
+  sound: boolean;
 }
 
-export const DEFAULT_SETTINGS: Settings = { theme: 'system', op: 'add', mode: '2', duration: 1 };
+export const DEFAULT_SETTINGS: Settings = { theme: 'system', op: 'add', mode: '2', duration: 1, sound: true };
 
 const DB_NAME = 'sumit';
 const STORES = ['attempts', 'rounds', 'kv'] as const;

@@ -4,8 +4,9 @@ import { analyze, randomProblem, type Mode, type Op, type Problem } from './prob
  * Adaptive problem picker.
  *
  * Every attempt yields a "struggle" signal:
- *   wrong          -> 2
- *   right          -> log2(time / expected time for that shape), clamped to [-1, 1.5]
+ *   skipped        -> 2
+ *   solved         -> log2(time / expected time for that shape) + 0.5 per wrong full-length
+ *                     entry, clamped to [-1, 2]
  * Expected time per shape (e.g. 2-digit + 1-digit) is learned, so the signal measures
  * "slower/faster than you usually are on problems of this size", not raw size.
  *
@@ -25,6 +26,8 @@ export interface AttemptLike {
   b: number;
   correct: boolean;
   ms: number;
+  misses?: number;
+  skipped?: boolean;
 }
 
 interface Stat { n: number; ema: number }
@@ -70,11 +73,13 @@ export class Model {
   observe(at: AttemptLike) {
     const { features, shape } = analyze({ op: at.op, a: at.a, b: at.b, answer: 0 });
     const ms = Math.max(at.ms, 150);
-    const struggle = at.correct
-      ? Math.min(1.5, Math.max(-1, Math.log2(ms / this.expectedMs(shape))))
-      : 2;
+    const failed = at.skipped || !at.correct;
+    const misses = at.misses ?? 0;
+    const struggle = failed
+      ? 2
+      : Math.min(2, Math.max(-1, Math.log2(ms / this.expectedMs(shape)) + 0.5 * misses));
 
-    if (at.correct) {
+    if (!failed && !misses) {
       let s = this.shapes.get(shape);
       if (!s) this.shapes.set(shape, (s = { n: 0, ema: 0 }));
       push(s, Math.log(Math.min(ms, priorMs(shape) * 6)));

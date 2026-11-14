@@ -1,34 +1,45 @@
 /**
- * Score = altitude in metres. Unbounded.
+ * Score = altitude in metres, relative to your own past self.
  *
- * Each correct answer earns
- *     load^1.8 · speed^0.7 · streak
- * where
- *   load   = intrinsic cognitive load of the problem (columns, carries, chains, borrows
- *            through zero). The super-linear exponent rewards harder problems more than
- *            proportionally, because working-memory cost grows faster than size.
- *   speed  = reference time / your time, clamped to [0.3, 2.5]. Reference time is an
- *            absolute (not personal) curve 1.2s · load^1.4, so the score tracks real
- *            improvement instead of normalising it away.
- *   streak = 1 + 0.3·(1 − e^(−k/8)) for k consecutive correct answers before this one.
- *            Rewards consistency, saturates at ×1.3.
+ * Every round yields a speed index:
+ *     S = Σ refTime(problem) over solved problems / Σ time actually spent (solved + skipped)
+ * refTime(load) = 1.2s · load^1.4 is a fixed curve of how long a problem of a given
+ * intrinsic load (columns, carries, chains, borrows through zero) "should" take.
+ * Dividing by it means harder problems aren't punished for taking longer, so the index
+ * stays fair even as the adaptive picker feeds you more of what you struggle with.
+ * Skipped problems and wrong full-length entries cost only time — there are no "errors".
  *
- * Round score = 25 · points per minute · accuracy².
- * Per-minute keeps 1/2/5 min rounds comparable; accuracy² makes guessing a bad strategy
- * (90% accuracy costs 19%, 70% costs 51%).
+ * There is one score per operation (+ / −), shared by all modes and durations.
+ * Your first round with an operation sets Base Camp (5 364 m, Everest's south base camp).
+ * Every later round:
+ *     altitude = 5 364 · (S / S_first)^1.5
+ * The summit (8 849 m) is reached when you are ~40% faster than you were on day one.
+ * Unbounded above; a bad day can put you below base camp.
  */
 
-export function pointsFor(load: number, ms: number, streak: number) {
-  const ref = 1200 * Math.pow(load, 1.4);
-  const speed = Math.min(2.5, Math.max(0.3, ref / Math.max(ms, 150)));
-  const streakMul = 1 + 0.3 * (1 - Math.exp(-streak / 8));
-  return Math.pow(load, 1.8) * Math.pow(speed, 0.7) * streakMul;
-}
-
-export function finalScore(points: number, correct: number, total: number, durationMs: number) {
-  if (!total) return 0;
-  const acc = correct / total;
-  return Math.round((25 * points * acc * acc) / (durationMs / 60000));
-}
-
+export const BASE_CAMP = 5364;
 export const EVEREST = 8849;
+const EXP = 1.5;
+
+export const refMs = (load: number) => 1200 * Math.pow(load, 1.4);
+
+export interface Solve {
+  load: number;
+  ms: number;
+  solved: boolean;
+}
+
+export function speedIndex(items: Solve[]) {
+  let ref = 0;
+  let spent = 0;
+  for (const it of items) {
+    spent += Math.max(it.ms, 150);
+    if (it.solved) ref += refMs(it.load);
+  }
+  return spent ? ref / spent : 0;
+}
+
+export function altitude(speed: number, baseline: number) {
+  if (!speed || !baseline) return 0;
+  return Math.round(BASE_CAMP * Math.pow(speed / baseline, EXP));
+}

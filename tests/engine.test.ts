@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, randomProblem, shapesFor } from '../src/engine/problem';
 import { Model } from '../src/engine/model';
-import { finalScore, pointsFor } from '../src/engine/score';
+import { altitude, BASE_CAMP, EVEREST, speedIndex } from '../src/engine/score';
 
 describe('problem', () => {
   it('shapes respect mode constraints', () => {
@@ -67,23 +67,24 @@ describe('model', () => {
 });
 
 describe('score', () => {
-  it('rewards speed, difficulty and accuracy', () => {
-    expect(pointsFor(2, 2000, 0)).toBeGreaterThan(pointsFor(2, 4000, 0));
-    expect(pointsFor(4, 6000, 0)).toBeGreaterThan(pointsFor(2, 3000, 0));
-    expect(finalScore(100, 10, 10, 60000)).toBeGreaterThan(finalScore(100, 9, 10, 60000));
-    expect(finalScore(100, 10, 10, 60000)).toBe(finalScore(200, 10, 10, 120000));
+  it('speed index rewards speed and is fair across difficulty', () => {
+    const fast = speedIndex([{ load: 2, ms: 2000, solved: true }]);
+    const slow = speedIndex([{ load: 2, ms: 4000, solved: true }]);
+    expect(fast).toBeGreaterThan(slow);
+    // a harder problem taking proportionally longer (by the reference curve) scores the same
+    const hardRef = 1200 * Math.pow(4, 1.4);
+    const easyRef = 1200 * Math.pow(2, 1.4);
+    expect(speedIndex([{ load: 4, ms: hardRef, solved: true }])).toBeCloseTo(speedIndex([{ load: 2, ms: easyRef, solved: true }]));
   });
-  it('typical 1-digit and 3-digit rounds land in similar ranges', () => {
-    const sim = (mode: '1' | '3', msPer: number) => {
-      let pts = 0, t = 0, k = 0, n = 0;
-      while (t < 60000) {
-        const p = randomProblem('add', mode);
-        const { load } = analyze(p);
-        const ms = msPer * (mode === '3' ? load / 4 : 1);
-        pts += pointsFor(load, ms, k++); t += ms; n++;
-      }
-      return finalScore(pts, n, n, 60000);
-    };
-    console.log({ one: sim('1', 1300), three: sim('3', 8000) });
+  it('skips cost time and earn nothing', () => {
+    const clean = speedIndex([{ load: 2, ms: 3000, solved: true }]);
+    const withSkip = speedIndex([{ load: 2, ms: 3000, solved: true }, { load: 2, ms: 3000, solved: false }]);
+    expect(withSkip).toBeCloseTo(clean / 2);
+  });
+  it('altitude is relative to the first round', () => {
+    expect(altitude(1, 1)).toBe(BASE_CAMP);
+    expect(altitude(0.8, 1)).toBeLessThan(BASE_CAMP);
+    expect(altitude(1.4, 1)).toBeGreaterThanOrEqual(EVEREST - 50);
+    expect(altitude(3, 1)).toBeGreaterThan(EVEREST);
   });
 });
