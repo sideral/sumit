@@ -3,31 +3,16 @@ import '@fontsource-variable/fraunces/full-italic.css';
 import './style.css';
 
 import { Model } from './engine/model';
-import { analyze, randomProblem, symbol, type Mode, type Op, type Problem } from './engine/problem';
-import { altitude, BASE_CAMP, EVEREST, speedIndex, type Solve } from './engine/score';
+import { randomProblem, symbol, type Mode, type Op, type Problem } from './engine/problem';
+import { altitude, EVEREST, speedIndex, usual, vsUsual, type Past, type Solve } from './engine/score';
 import {
   allAttempts, allRounds, exportAll, getSettings, importAll, persist, putAttempt, putRound,
   saveSettings, uid, wipe, type Attempt, type Round, type Settings, type Theme,
 } from './db';
+import { h, type Child } from './ui/dom';
 import { icon, logo, pie, ridges } from './ui/icons';
+import { statsScreen } from './ui/stats';
 import { setSound, sfx, unlockAudio } from './sound';
-
-/* ---------------- tiny DOM helper ---------------- */
-type Child = Node | string | number | false | null | undefined;
-function h<K extends keyof HTMLElementTagNameMap>(sel: K | `${K}.${string}`, props: Record<string, unknown> = {}, ...kids: Child[]) {
-  const [tag, ...cls] = sel.split('.') as [K, ...string[]];
-  const el = document.createElement(tag);
-  if (cls.length) el.className = cls.join(' ');
-  for (const [k, v] of Object.entries(props)) {
-    if (v == null || v === false) continue;
-    if (k.startsWith('on')) el.addEventListener(k.slice(2), v as EventListener);
-    else if (k === 'class') el.className += ' ' + v;
-    else if (k === 'style') el.setAttribute('style', String(v));
-    else el.setAttribute(k, v === true ? '' : String(v));
-  }
-  for (const c of kids) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
-  return el;
-}
 
 /* ---------------- state ---------------- */
 const app = document.getElementById('app')!;
@@ -40,18 +25,23 @@ let cleanup: (() => void) | null = null;
 // One score per operation, across all modes and durations. The speed index is already
 // normalised for problem difficulty, so rounds in different modes are comparable.
 const scored = () => rounds.filter((r) => r.speed);
-const bestFor = (op: Op) => scored().reduce((m, r) => (r.op === op ? Math.max(m, r.score) : m), 0);
-/** Speed of your first round with this operation: your personal base camp. */
-const baseCamp = (op: Op) => scored().filter((r) => r.op === op).sort((a, b) => a.ts - b.ts)[0]?.speed ?? 0;
+const bestFor = (op: Op) => scored().reduce((m, r) => (r.op === op ? Math.max(m, r.score) : m), -Infinity);
+/** Your usual performance (Camp, 0 m) for this operation, from previous rounds. */
+const usualFor = (op: Op) => usual(scored().filter((r) => r.op === op).map((r) => ({ speed: r.speed!, ts: r.ts })), Date.now());
 const fmtNum = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
+const fmtSigned = (n: number) => (n > 0 ? '+' : n < 0 ? '−' : '') + fmtNum(Math.abs(n));
 
-/** Altitudes are always relative to the earliest round of each operation. */
+/** Each round's altitude is relative to your usual performance *before* that round. */
 function rescore() {
-  const base = new Map<string, number>();
+  const prev = new Map<Op, Past[]>();
   for (const r of [...rounds].sort((a, b) => a.ts - b.ts)) {
     if (!r.speed) continue;
-    if (!base.has(r.op)) base.set(r.op, r.speed);
-    r.score = altitude(r.speed, base.get(r.op)!);
+    const list = prev.get(r.op) ?? [];
+    const u = usual(list, r.ts);
+    r.score = altitude(r.speed, u);
+    r.ratio = vsUsual(r.speed, u) ?? undefined;
+    list.push({ speed: r.speed, ts: r.ts });
+    prev.set(r.op, list);
   }
 }
 
@@ -174,7 +164,9 @@ function home() {
 
   setTimeout(() => sfx.enter(), 120);
   return h('section.screen.home', {},
-    h('div.top', {}, h('span'), h('button.ibtn', { 'aria-label': 'Options', onclick: () => { sfx.tap(); go(options); } }, icon('sliders'))),
+    h('div.top', {}, h('span'), h('div.tools', {},
+      h('button.ibtn', { 'aria-label': 'Stats', onclick: () => { sfx.tap(); go(stats); } }, icon('stats')),
+      h('button.ibtn', { 'aria-label': 'Options', onclick: () => { sfx.tap(); go(options); } }, icon('sliders')))),
     h('div.hero', {}, logo(), h('div.wordmark', {}, 'Sum', h('b', {}, 'It'))),
     h('div.ops', {}, opBtn('add'), opBtn('sub')),
     ridges(),
@@ -241,9 +233,12 @@ function game(op: Op, mode: Mode, minutes: number) {
   let locked = true;
   let raf = 0;
   let over = false;
-  let lastSec = -1;
   const solves: Solve[] = [];
-  const recent: Problem[] = [];
+  // Fixed for the whole round: enough problems for ~0.6 s each, drawn from the model as it
+  // is now. What the round teaches the model only affects the next round.
+  const plan = model.plan(op, mode, Math.ceil((minutes * 60) / 0.6));
+  let planIdx = 0;
+  let curPred = 0;
   const timers: number[] = [];
   const later = (fn: () => void, ms: number) => timers.push(window.setTimeout(fn, ms));
 
@@ -314,7 +309,7 @@ function game(op: Op, mode: Mode, minutes: number) {
 
   function record(solvedIt: boolean) {
     const ms = Math.round(performance.now() - shownAt);
-    solves.push({ load: analyze(cur!).load, ms, solved: solvedIt });
+    solves.push({ pred: curPred, ms, solved: solvedIt }); // prediction frozen at round start
     const at: Attempt = {
       id: uid(), ts: Date.now(), round: roundId, op, a: cur!.a, b: cur!.b,
       given: solvedIt ? cur!.answer : null, correct: solvedIt, ms, misses, skipped: !solvedIt,
@@ -340,10 +335,10 @@ function game(op: Op, mode: Mode, minutes: number) {
   }
 
   function next() {
-    cur = model.pick(op, mode, recent);
+    const item = plan[planIdx++ % plan.length];
+    cur = item.problem;
+    curPred = item.pred;
     target = String(cur.answer);
-    recent.push(cur);
-    if (recent.length > 6) recent.shift();
     probEl.replaceChildren(String(cur.a), h('span.o', {}, symbol(op)), String(cur.b));
     input = '';
     misses = 0;
@@ -363,9 +358,6 @@ function game(op: Op, mode: Mode, minutes: number) {
     barFill.style.transform = `scaleX(${left / durMs})`;
     const t = fmtTime(left);
     if (timeEl.textContent !== t) timeEl.textContent = t;
-    screen.classList.toggle('late', left <= 10000);
-    const sec = Math.ceil(left / 1000);
-    if (sec !== lastSec) { if (sec <= 10 && lastSec !== -1) sfx.tick(); lastSec = sec; }
     raf = requestAnimationFrame(tick);
   }
 
@@ -374,14 +366,15 @@ function game(op: Op, mode: Mode, minutes: number) {
     locked = true;
     sfx.end();
     const speed = speedIndex(solves);
-    if (!solves.length || !speed) return go(() => result(op, 0, null));
-    const camp = baseCamp(op);
-    const score = camp ? altitude(speed, camp) : BASE_CAMP;
+    if (!solves.length || !speed) return go(() => result(op, 0, null, null));
+    const u = usualFor(op);
+    const score = altitude(speed, u);
+    const ratio = vsUsual(speed, u);
     const prev = bestFor(op);
-    const r: Round = { id: roundId, ts: Date.now(), op, mode, duration: minutes, score, count: solves.length, speed };
+    const r: Round = { id: roundId, ts: Date.now(), op, mode, duration: minutes, score, count: solves.length, speed, ratio: ratio ?? undefined };
     rounds.push(r);
     void putRound(r);
-    go(() => result(op, score, !camp ? 'camp' : score > prev ? 'best' : null));
+    go(() => result(op, score, !u ? 'camp' : score > prev ? 'best' : null, ratio));
   }
 
   const onKey = (e: KeyboardEvent) => {
@@ -418,53 +411,84 @@ function game(op: Op, mode: Mode, minutes: number) {
 
 type Badge = 'camp' | 'best' | null;
 
-function result(op: Op, score: number, badge: Badge) {
+/** Plain-language reading of the score: pace vs. your usual, difficulty-adjusted. */
+function paceText(ratio: number | null, badge: Badge) {
+  if (badge === 'camp' || ratio == null) return 'first climb — this sets your usual pace';
+  const faster = ratio > 1;
+  const r = faster ? ratio : 1 / ratio;
+  const pct = (r - 1) * 100;
+  if (pct < 0.05) return 'right at your usual pace';
+  // percentages with one decimal; past +50% a multiplier with two decimals reads better
+  const amount = r >= 1.5 ? `${r.toFixed(2)}×` : `${pct.toFixed(1)}%`;
+  return `${amount} ${faster ? 'faster' : 'slower'} than usual`;
+}
+
+function result(op: Op, score: number, badge: Badge, ratio: number | null) {
+  // Camp (0 m) sits on the ground line. Better than usual climbs the mountain;
+  // worse than usual descends into the crevasse below.
+  const up = 'M70 150 150 134 96 116 176 98 124 80 178 64 144 48 172 34 170 22';
+  const down = 'M70 150 58 160 46 172 52 188 42 206 48 224 44 242';
   const climb = h('div.climb');
-  const trail = 'M64 176 150 160 90 138 176 118 120 96 180 78 142 58 172 40 170 22';
-  climb.innerHTML = `<svg viewBox="0 0 320 184" aria-hidden="true">
-    <path class="m-back" d="M0 182 92 96l40 34 62-70 126 122Z"/>
-    <path class="m-peak" d="M30 182 170 22l130 160Z"/>
-    <path class="m-snow" d="M170 22 196 52l-14-5-10 11-12-11-14 7Z"/>
-    <path class="trail" d="${trail}"/>
-    <path class="done" d="${trail}"/>
-    <path class="camp" d="M-7 0 0-10 7 0Z"/>
-    <path d="M170 22V4" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--muted)"/>
-    <path class="top-flag" d="M170 4l14 5-14 5Z"/>
-    <circle class="halo" r="7"/>
-    <circle class="me" r="6"/>
+  climb.innerHTML = `<svg viewBox="0 0 320 250" aria-hidden="true">
+    <defs>
+      <linearGradient id="abyss" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="var(--crevasse)"/><stop offset="1" stop-color="var(--abyss)"/>
+      </linearGradient>
+      <linearGradient id="soil" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="var(--r2)"/><stop offset="1" stop-color="var(--r2)" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="hfade" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".15" stop-color="#fff"/>
+        <stop offset=".85" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+      </linearGradient>
+      <mask id="edges"><rect x="-20" y="0" width="360" height="250" fill="url(#hfade)"/></mask>
+    </defs>
+    <path class="m-back" d="M0 150 70 92l34 26 50-56 166 88Z" mask="url(#edges)"/>
+    <path class="m-peak" d="M40 150 170 20l130 130Z"/>
+    <path class="m-snow" d="M170 20 192 46l-12-5-9 10-10-10-12 6Z"/>
+    <path d="M-20 150H340V250H-20Z" fill="url(#soil)" mask="url(#edges)"/>
+    <path class="horizon" d="M-20 150H340" mask="url(#edges)"/>
+    <path class="crevasse" d="M24 150H62L56 170 50 196 44 250H40L36 200 30 176Z" fill="url(#abyss)"/>
+    <path class="trail" d="${up}"/>
+    <path class="trail" d="${down}"/>
+    <path class="done" d="${score < 0 ? down : up}"/>
+    <path class="camp" d="M62 150 70 139l8 11Z"/>
+    <path d="M170 20V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color:var(--muted)"/>
+    <path class="top-flag" d="M170 3l14 5-14 5Z"/>
+    <circle class="halo" r="7" cx="70" cy="150"/>
+    <circle class="me" r="6" cx="70" cy="150"/>
   </svg>`;
   const done = climb.querySelector<SVGPathElement>('.done')!;
-  const camp = climb.querySelector<SVGPathElement>('.camp')!;
   const me = climb.querySelector<SVGCircleElement>('.me')!;
   const halo = climb.querySelector<SVGCircleElement>('.halo')!;
 
   const num = h('span', {}, '0');
-  const scoreEl = h('div.score', {}, num, h('small', {}, 'm'));
-  const rec = h(`div.record${badge ? '' : '.hide'}`, { 'aria-label': badge === 'camp' ? 'Base camp set' : badge ? 'New best' : '' },
-    icon(badge === 'camp' ? 'tent' : 'flag', 22));
+  const rec = badge && h('div.record', { 'aria-label': badge === 'camp' ? 'Camp set' : 'New best' },
+    icon(badge === 'camp' ? 'tent' : 'flag', 18));
+  const scoreEl = h(`div.score${score < 0 ? '.neg' : ''}`, {}, num, h('small', {}, 'm'), rec);
 
   const screen = h(`section.screen.result.${op}`, {},
     h('div.top'),
-    h('div.mid', {}, climb, scoreEl, rec),
+    h('div.mid', {}, climb, scoreEl, h('div.pace', {}, paceText(ratio, badge))),
     h('div.actions', {},
       h('button.btn', { 'aria-label': 'Home', onclick: () => { sfx.back(); go(home, 'back'); } }, icon('home')),
       h('button.btn.primary', { 'aria-label': 'Again', onclick: () => { sfx.tap(); go(() => game(op, settings.mode, settings.duration)); } }, icon('again', 26)),
     ),
   );
 
-  const frac = Math.min(score / EVEREST, 1);
+  const frac = Math.min(Math.abs(score) / EVEREST, 1);
   let raf = 0;
   requestAnimationFrame(() => {
     const len = done.getTotalLength();
-    const c = done.getPointAtLength(len * (BASE_CAMP / EVEREST));
-    camp.setAttribute('transform', `translate(${c.x} ${c.y + 1})`);
     done.style.strokeDasharray = `${len}`;
-    const t0 = performance.now();
-    const D = reduced() ? 1 : 1500;
+    done.style.strokeDashoffset = `${len}`;
+    let t0 = 0;
+    const D = reduced() || !score ? 1 : 1500;
     const step = (now: number) => {
-      const t = Math.min((now - t0) / D, 1);
+      t0 ||= now;
+      const t = Math.min(Math.max((now - t0) / D, 0), 1);
       const e = 1 - Math.pow(1 - t, 3);
-      num.textContent = fmtNum(Math.round(score * e));
+      num.textContent = fmtSigned(Math.round(score * e));
       const L = len * frac * e;
       done.style.strokeDashoffset = `${len - L}`;
       const p = done.getPointAtLength(L);
@@ -480,6 +504,92 @@ function result(op: Op, score: number, badge: Badge) {
   });
   cleanup = () => cancelAnimationFrame(raf);
   return screen;
+}
+
+/** Modal confirmation. Resolves true only on the explicit destructive button. */
+function confirmDialog(text: string, yes: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const close = (v: boolean) => {
+      overlay.classList.add('out');
+      overlay.addEventListener('animationend', () => overlay.remove(), { once: true });
+      window.removeEventListener('keydown', onKey);
+      resolve(v);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(false); };
+    const cancel = h('button.btn', { onclick: () => { sfx.back(); close(false); } }, 'cancel');
+    const sheet = h('div.sheet', { role: 'alertdialog', 'aria-modal': 'true' },
+      h('div.danger', {}, icon('trash', 26)),
+      h('p', {}, text),
+      h('div.sheet-actions', {},
+        cancel,
+        h('button.btn.destroy', { onclick: () => close(true) }, yes)));
+    const overlay = h('div.overlay', { onclick: (e: Event) => { if (e.target === overlay) close(false); } }, sheet);
+    window.addEventListener('keydown', onKey);
+    document.body.append(overlay);
+    cancel.focus();
+  });
+}
+
+/** Save a JSON backup. On phones a share sheet is the most useful way out (Files, AirDrop...). */
+async function exportData() {
+  sfx.tap();
+  const dump = await exportAll();
+  const blob = new Blob([JSON.stringify(dump)], { type: 'application/json' });
+  const name = `sumit-${new Date().toISOString().slice(0, 10)}.json`;
+  const fileObj = new File([blob], name, { type: 'application/json' });
+  const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
+  if (matchMedia('(pointer: coarse)').matches && nav.canShare?.({ files: [fileObj] })) {
+    try { await navigator.share({ files: [fileObj] }); return; } catch (e) { if ((e as Error).name === 'AbortError') return; }
+  }
+  const a = h('a', { href: URL.createObjectURL(blob), download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/** Merge a JSON backup into the database. Resolves true if something was imported. */
+function importData(): Promise<boolean> {
+  sfx.tap();
+  return new Promise((resolve) => {
+    const file = h('input', { type: 'file', accept: 'application/json,.json' }) as HTMLInputElement;
+    file.addEventListener('change', async () => {
+      const f = file.files?.[0];
+      if (!f) return resolve(false);
+      try {
+        const res = await importAll(JSON.parse(await f.text()));
+        await reload();
+        toast(icon('check', 18), `${fmtNum(res.rounds)} rounds · ${fmtNum(res.attempts)} answers`);
+        resolve(true);
+      } catch {
+        toast(icon('x', 18), 'invalid file');
+        resolve(false);
+      }
+    });
+    file.addEventListener('cancel', () => resolve(false));
+    file.click();
+  });
+}
+
+/** Erase every round and attempt (settings are kept), after confirmation. */
+async function eraseAll() {
+  sfx.tap();
+  if (!(await confirmDialog('Erase all rounds and practice history? This can’t be undone.', 'erase all'))) return false;
+  await wipe();
+  await reload();
+  toast(icon('trash', 18), 'erased');
+  return true;
+}
+
+function stats() {
+  const el = statsScreen({
+    op: settings.op,
+    rounds,
+    attempts: allAttempts,
+    paceText: (r) => paceText(r ?? null, r == null ? 'camp' : null),
+    back: () => { sfx.back(); go(home, 'back'); },
+    select: () => sfx.select(),
+  });
+  cleanup = el.cleanup;
+  return el.screen;
 }
 
 function options() {
@@ -516,55 +626,6 @@ function options() {
   );
   renderStat();
 
-  const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true }) as HTMLInputElement;
-  file.addEventListener('change', async () => {
-    const f = file.files?.[0];
-    file.value = '';
-    if (!f) return;
-    try {
-      const res = await importAll(JSON.parse(await f.text()));
-      await reload();
-      renderStat();
-      toast(icon('check', 18), `${fmtNum(res.attempts)} · ${fmtNum(res.rounds)}`);
-    } catch {
-      toast(icon('x', 18), 'invalid file');
-    }
-  });
-
-  const exp = async () => {
-    const dump = await exportAll();
-    const blob = new Blob([JSON.stringify(dump)], { type: 'application/json' });
-    const name = `sumit-${new Date().toISOString().slice(0, 10)}.json`;
-    const fileObj = new File([blob], name, { type: 'application/json' });
-    const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
-    // On iOS a share sheet is the most useful way to get the file out (Files, AirDrop...).
-    if (matchMedia('(pointer: coarse)').matches && nav.canShare?.({ files: [fileObj] })) {
-      try { await navigator.share({ files: [fileObj] }); return; } catch (e) { if ((e as Error).name === 'AbortError') return; }
-    }
-    const a = h('a', { href: URL.createObjectURL(blob), download: name });
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  };
-
-  let armed = 0;
-  const reset = h('button.chip.warn', { 'aria-label': 'Erase all data' }, icon('trash'));
-  reset.addEventListener('click', async () => {
-    if (!armed) {
-      reset.classList.add('arm');
-      reset.replaceChildren(icon('check'));
-      armed = window.setTimeout(() => { armed = 0; reset.classList.remove('arm'); reset.replaceChildren(icon('trash')); }, 3000);
-      return;
-    }
-    clearTimeout(armed);
-    armed = 0;
-    await wipe();
-    await reload();
-    renderStat();
-    reset.classList.remove('arm');
-    reset.replaceChildren(icon('trash'));
-    toast(icon('trash', 18), '0');
-  });
-
   return h('section.screen.opts', {},
     h('div.top', {}, h('button.ibtn', { 'aria-label': 'Back', onclick: () => { sfx.back(); go(home, 'back'); } }, icon('back', 28)), h('span')),
     h('div.body', {},
@@ -573,11 +634,10 @@ function options() {
       h('div', {},
         h('h2', {}, icon('data', 15), 'data'),
         h('div.group.g3', {},
-          h('button.chip', { 'aria-label': 'Export', onclick: exp }, icon('download')),
-          h('button.chip', { 'aria-label': 'Import', onclick: () => file.click() }, icon('upload')),
-          reset),
-        stat,
-        file),
+          h('button.chip', { 'aria-label': 'Export', onclick: exportData }, icon('download')),
+          h('button.chip', { 'aria-label': 'Import', onclick: async () => { if (await importData()) renderStat(); } }, icon('upload')),
+          h('button.chip.warn', { 'aria-label': 'Erase all data', onclick: async () => { if (await eraseAll()) renderStat(); } }, icon('trash'))),
+        stat),
     ),
   );
 }
@@ -587,14 +647,23 @@ async function reload() {
   const [atts, rs] = await Promise.all([allAttempts(), allRounds()]);
   model.reset();
   const byRound = new Map<string, Solve[]>();
-  for (const a of atts) {
-    model.observe(a);
-    let list = byRound.get(a.round);
-    if (!list) byRound.set(a.round, (list = []));
-    list.push({ load: analyze({ op: a.op, a: a.a, b: a.b, answer: 0 }).load, ms: a.ms, solved: a.correct });
+  // Replay history round by round, exactly as it happened live: every answer in a round is
+  // predicted with what the model knew when the round started, then the round is learned.
+  for (let i = 0; i < atts.length;) {
+    let j = i;
+    while (j < atts.length && atts[j].round === atts[i].round) j++;
+    const chunk = atts.slice(i, j);
+    const preds = chunk.map((a) => model.predictMs({ op: a.op, a: a.a, b: a.b, answer: 0 }));
+    let list = byRound.get(atts[i].round);
+    if (!list) byRound.set(atts[i].round, (list = []));
+    chunk.forEach((a, k) => { model.observe(a); list!.push({ pred: preds[k], ms: a.ms, solved: a.correct }); });
+    i = j;
   }
-  // Rounds stored before the speed index existed: derive it from their attempts.
-  for (const r of rs) if (r.speed == null) r.speed = speedIndex(byRound.get(r.id) ?? []);
+  // Pace is always derived from attempts, so it stays consistent if the model changes.
+  for (const r of rs) {
+    const list = byRound.get(r.id);
+    if (list?.length) r.speed = speedIndex(list);
+  }
   attemptCount = atts.length;
   rounds = rs;
   rescore();

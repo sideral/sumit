@@ -27,6 +27,8 @@ export interface Round {
   count: number;
   /** Speed index, see engine/score.ts. */
   speed?: number;
+  /** Pace vs. your usual at the time (derived on load, not essential). */
+  ratio?: number;
 }
 
 export type Theme = 'system' | 'light' | 'dark';

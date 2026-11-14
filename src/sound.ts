@@ -92,8 +92,6 @@ export const sfx = {
     tone({ f: N.C6 * 1.5, t: 0.04, d: 0.12, v: 0.06, type: 'sine' });
   },
   miss() { tone({ f: 180, to: 120, d: 0.16, v: 0.22, type: 'triangle' }); },
-  /** Last 10 seconds. */
-  tick() { tone({ f: 2000, d: 0.025, v: 0.06, type: 'square' }); },
   /** Time's up: low gong. */
   end() { bell(N.C4, 0, 1.4, 0.26); bell(N.G4, 0.02, 1.1, 0.1); },
   /** New best / summit. */

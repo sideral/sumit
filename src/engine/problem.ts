@@ -64,7 +64,13 @@ export function analyze(p: Problem): Analysis {
       const both = x !== undefined && y !== undefined;
       const s = (x ?? 0) + (y ?? 0) + carry;
       if (both) {
+        // The pair itself (order-free), plus the pair as written: 8+7 and 7+8 share
+        // a base speed but each order can learn its own extra cost.
         f.add(`a:${Math.min(x, y)}+${Math.max(x, y)}`);
+        if (x !== y) {
+          f.add(`a:o${x}+${y}`);
+          f.add(x < y ? 'a:col-smaller-first' : 'a:col-larger-first');
+        }
         load += 1;
         if (carry) { f.add('a:carry-in'); load += 0.3; }
       } else {
@@ -78,6 +84,9 @@ export function analyze(p: Problem): Analysis {
     }
     if (carries) { f.add('a:carry'); f.add(`a:carries${Math.min(carries, 3)}`); load += 0.9 * carries; }
     else f.add('a:no-carry');
+    // Operand order: 8 + 47 vs 47 + 8, and 23 + 58 vs 58 + 23.
+    if (da.length !== db.length) f.add(da.length < db.length ? 'a:short-first' : 'a:long-first');
+    else if (p.a !== p.b) f.add(p.a < p.b ? 'a:smaller-first' : 'a:larger-first');
   } else {
     let borrow = 0;
     let borrows = 0;

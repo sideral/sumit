@@ -1,45 +1,83 @@
 /**
- * Score = altitude in metres, relative to your own past self.
+ * Score = altitude in metres relative to Camp (0 m) = your usual performance.
  *
- * Every round yields a speed index:
- *     S = Σ refTime(problem) over solved problems / Σ time actually spent (solved + skipped)
- * refTime(load) = 1.2s · load^1.4 is a fixed curve of how long a problem of a given
- * intrinsic load (columns, carries, chains, borrows through zero) "should" take.
- * Dividing by it means harder problems aren't punished for taking longer, so the index
- * stays fair even as the adaptive picker feeds you more of what you struggle with.
- * Skipped problems and wrong full-length entries cost only time — there are no "errors".
+ * Every round yields a pace index:
+ *     P = Σ predicted time / Σ actual time   (over the problems you solved)
+ * "Predicted" is the adaptive model's estimate — made *before* you answered — of how
+ * long you usually take on that exact kind of problem (its digit sizes, carries,
+ * borrows, specific facts like 7+8). So difficulty is judged against your own history:
+ * a round full of your weak spots isn't held against you. P > 1 = quicker than predicted.
+ * Only time counts — no errors.
  *
- * There is one score per operation (+ / −), shared by all modes and durations.
- * Your first round with an operation sets Base Camp (5 364 m, Everest's south base camp).
- * Every later round:
- *     altitude = 5 364 · (S / S_first)^1.5
- * The summit (8 849 m) is reached when you are ~40% faster than you were on day one.
- * Unbounded above; a bad day can put you below base camp.
+ * Your "usual" is the distribution of ln(P) over *all* your previous rounds of the same
+ * operation (all modes and durations), each weighted by how long ago it was:
+ * weight = ½^(age / 60 days) — 2 months ago counts half, 1 year ago ~1.6%.
+ * Nothing is cut off; old rounds just fade. μ and σ are the weighted mean and spread.
+ * The score is how many σ this round sits above or below μ:
+ *     altitude = 4 425 m · (ln P − μ) / σ
+ * so   a usual round        →      0 m (Camp)
+ *      1σ better than usual → +4 425 m
+ *      2σ better            → +8 850 m (summit: ~1 in 44 rounds by chance alone,
+ *                                       ~22% faster than usual at a 10% spread)
+ *      worse than usual     → negative (the abyss)
+ * The plain-language line under the score is e^(ln P − μ): "15% faster than usual".
+ *
+ * With little (recent) history σ is unreliable, so it's blended with a prior spread
+ * (≈10%) that fades out as the effective number of rounds grows. Your first round with an operation sets Camp: 0 m.
  */
 
-export const BASE_CAMP = 5364;
 export const EVEREST = 8849;
-const EXP = 1.5;
-
-export const refMs = (load: number) => 1200 * Math.pow(load, 1.4);
+export const SIGMA_M = 4425; // metres per standard deviation; summit ≈ +2σ
+export const HALF_LIFE_DAYS = 60;
+const DAY = 86_400_000;
+const PRIOR_SD = 0.1; // ln-units, ≈ 10% speed variation
+const PRIOR_WEIGHT = 4; // in rounds
+const MIN_SD = 0.03;
 
 export interface Solve {
-  load: number;
+  /** Model's personal time prediction for the problem, taken before answering. */
+  pred: number;
   ms: number;
   solved: boolean;
 }
 
 export function speedIndex(items: Solve[]) {
-  let ref = 0;
+  let pred = 0;
   let spent = 0;
   for (const it of items) {
     spent += Math.max(it.ms, 150);
-    if (it.solved) ref += refMs(it.load);
+    if (it.solved) pred += it.pred;
   }
-  return spent ? ref / spent : 0;
+  return spent ? pred / spent : 0;
 }
 
-export function altitude(speed: number, baseline: number) {
-  if (!speed || !baseline) return 0;
-  return Math.round(BASE_CAMP * Math.pow(speed / baseline, EXP));
+export interface Usual { mean: number; sd: number; n: number }
+export interface Past { speed: number; ts: number }
+
+/** Weight of a round played `ageMs` ago. */
+export const decay = (ageMs: number) => Math.pow(0.5, Math.max(0, ageMs) / (HALF_LIFE_DAYS * DAY));
+
+/** Your usual performance as of `now`, from previous rounds. null if none. */
+export function usual(past: Past[], now: number): Usual | null {
+  const xs = past.filter((p) => p.speed > 0).map((p) => ({ x: Math.log(p.speed), w: decay(now - p.ts) }));
+  if (!xs.length) return null;
+  const W = xs.reduce((a, p) => a + p.w, 0);
+  const W2 = xs.reduce((a, p) => a + p.w * p.w, 0);
+  const mean = xs.reduce((a, p) => a + p.w * p.x, 0) / W;
+  const variance = xs.reduce((a, p) => a + p.w * (p.x - mean) ** 2, 0) / W;
+  const n = (W * W) / W2; // effective number of rounds
+  // pooled with the prior: (sum of squares ≈ var·n + prior pseudo-rounds) / (dof + prior weight)
+  const sd = Math.max(MIN_SD, Math.sqrt((variance * n + PRIOR_WEIGHT * PRIOR_SD ** 2) / (Math.max(0, n - 1) + PRIOR_WEIGHT)));
+  return { mean, sd, n };
+}
+
+/** This round's pace relative to your usual: 1.15 = 15% faster, 0.5 = 2× slower. */
+export function vsUsual(speed: number, u: Usual | null) {
+  if (!speed || !u) return null;
+  return Math.exp(Math.log(speed) - u.mean);
+}
+
+export function altitude(speed: number, u: Usual | null) {
+  if (!speed || !u) return 0;
+  return Math.round((SIGMA_M * (Math.log(speed) - u.mean)) / u.sd);
 }
