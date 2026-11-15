@@ -154,6 +154,16 @@ describe('score', () => {
     // a problem predicted to be hard for you isn't held against you
     expect(speedIndex([{ pred: 8000, ms: 8000, solved: true }])).toBeCloseTo(speedIndex([{ pred: 2000, ms: 2000, solved: true }]));
   });
+
+  it('counts the time left on the unanswered last problem', () => {
+    const fast = { pred: 3000, ms: 1000, solved: true };
+    // one quick answer, then waiting out a minute: no longer a great pace
+    expect(speedIndex([fast], { pred: 3000, ms: 59_000 })).toBeCloseTo(6000 / 60_000);
+    // cut off mid-problem at exactly the usual pace: unchanged
+    expect(speedIndex([{ pred: 3000, ms: 3000, solved: true }], { pred: 3000, ms: 1500 })).toBeCloseTo(1);
+    // nothing open: as before
+    expect(speedIndex([fast], null)).toBeCloseTo(3);
+  });
   it('unsolved problems cost time and earn nothing', () => {
     const clean = speedIndex([{ pred: 3000, ms: 3000, solved: true }]);
     const withUnsolved = speedIndex([{ pred: 3000, ms: 3000, solved: true }, { pred: 3000, ms: 3000, solved: false }]);

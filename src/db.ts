@@ -29,6 +29,8 @@ export interface Round {
   speed?: number;
   /** Pace vs. your usual at the time (derived on load, not essential). */
   ratio?: number;
+  /** The problem left unanswered when time ran out, and how long it was on screen. */
+  open?: { a: number; b: number; ms: number };
 }
 
 export type Theme = 'system' | 'light' | 'dark';

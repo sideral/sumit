@@ -8,6 +8,9 @@
  * borrows, specific facts like 7+8). So difficulty is judged against your own history:
  * a round full of your weak spots isn't held against you. P > 1 = quicker than predicted.
  * Only time counts — no errors.
+ * The problem still open when time runs out counts too: its time is all spent, and it
+ * earns credit for at most its predicted time. So stalling on it can only lower P, while
+ * being cut off mid-problem at your usual speed leaves P unchanged.
  *
  * Your "usual" is the distribution of ln(P) over *all* your previous rounds of the same
  * operation (all modes and durations), each weighted by how long ago it was:
@@ -41,12 +44,19 @@ export interface Solve {
   solved: boolean;
 }
 
-export function speedIndex(items: Solve[]) {
+/** The problem on screen when time ran out. */
+export interface Open { pred: number; ms: number }
+
+export function speedIndex(items: Solve[], open?: Open | null) {
   let pred = 0;
   let spent = 0;
   for (const it of items) {
     spent += Math.max(it.ms, 150);
     if (it.solved) pred += it.pred;
+  }
+  if (open && open.ms > 0) {
+    spent += open.ms;
+    pred += Math.min(open.ms, open.pred);
   }
   return spent ? pred / spent : 0;
 }

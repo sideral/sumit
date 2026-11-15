@@ -226,6 +226,7 @@ function game(op: Op, mode: Mode, minutes: number) {
   const durMs = minutes * 60000;
   let endAt = 0;
   let cur: Problem | null = null;
+  let pending = false; // a problem is on screen and not yet answered
   let target = '';
   let shownAt = 0;
   let input = '';
@@ -308,6 +309,7 @@ function game(op: Op, mode: Mode, minutes: number) {
   }
 
   function record(solvedIt: boolean) {
+    pending = false;
     const ms = Math.round(performance.now() - shownAt);
     solves.push({ pred: curPred, ms, solved: solvedIt }); // prediction frozen at round start
     const at: Attempt = {
@@ -349,6 +351,7 @@ function game(op: Op, mode: Mode, minutes: number) {
       ansEl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180 });
     }
     shownAt = performance.now();
+    pending = true;
     locked = false;
   }
 
@@ -365,13 +368,17 @@ function game(op: Op, mode: Mode, minutes: number) {
     over = true;
     locked = true;
     sfx.end();
-    const speed = speedIndex(solves);
+    // The unanswered problem's time still counts, so one quick answer and then waiting out
+    // the clock can't produce a great pace.
+    const openMs = cur && pending ? Math.max(0, Math.round(performance.now() - shownAt)) : 0;
+    const open = openMs ? { a: cur!.a, b: cur!.b, ms: openMs } : undefined;
+    const speed = speedIndex(solves, open && { pred: curPred, ms: openMs });
     if (!solves.length || !speed) return go(() => result(op, 0, null, null));
     const u = usualFor(op);
     const score = altitude(speed, u);
     const ratio = vsUsual(speed, u);
     const prev = bestFor(op);
-    const r: Round = { id: roundId, ts: Date.now(), op, mode, duration: minutes, score, count: solves.length, speed, ratio: ratio ?? undefined };
+    const r: Round = { id: roundId, ts: Date.now(), op, mode, duration: minutes, score, count: solves.length, speed, ratio: ratio ?? undefined, open };
     rounds.push(r);
     void putRound(r);
     go(() => result(op, score, !u ? 'camp' : score > prev ? 'best' : null, ratio));
@@ -647,6 +654,8 @@ async function reload() {
   const [atts, rs] = await Promise.all([allAttempts(), allRounds()]);
   model.reset();
   const byRound = new Map<string, Solve[]>();
+  const openPred = new Map<string, number>();
+  const roundById = new Map(rs.map((r) => [r.id, r]));
   // Replay history round by round, exactly as it happened live: every answer in a round is
   // predicted with what the model knew when the round started, then the round is learned.
   for (let i = 0; i < atts.length;) {
@@ -654,6 +663,8 @@ async function reload() {
     while (j < atts.length && atts[j].round === atts[i].round) j++;
     const chunk = atts.slice(i, j);
     const preds = chunk.map((a) => model.predictMs({ op: a.op, a: a.a, b: a.b, answer: 0 }));
+    const o = roundById.get(atts[i].round)?.open;
+    if (o) openPred.set(atts[i].round, model.predictMs({ op: atts[i].op, a: o.a, b: o.b, answer: 0 }));
     let list = byRound.get(atts[i].round);
     if (!list) byRound.set(atts[i].round, (list = []));
     chunk.forEach((a, k) => { model.observe(a); list!.push({ pred: preds[k], ms: a.ms, solved: a.correct }); });
@@ -662,7 +673,8 @@ async function reload() {
   // Pace is always derived from attempts, so it stays consistent if the model changes.
   for (const r of rs) {
     const list = byRound.get(r.id);
-    if (list?.length) r.speed = speedIndex(list);
+    const p = openPred.get(r.id);
+    if (list?.length) r.speed = speedIndex(list, r.open && p !== undefined ? { pred: p, ms: r.open.ms } : null);
   }
   attemptCount = atts.length;
   rounds = rs;
